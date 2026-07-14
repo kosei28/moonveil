@@ -2,11 +2,11 @@
 import PackageDescription
 
 let package = Package(
-    name: "netafuri",
+    name: "moonveil",
     platforms: [.macOS(.v13)],
     targets: [
         .executableTarget(
-            name: "netafuri",
+            name: "moonveil",
             path: "Sources"
         )
     ]

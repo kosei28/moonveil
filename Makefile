@@ -1,4 +1,4 @@
-BINARY_NAME = netafuri
+BINARY_NAME = moonveil
 INSTALL_PATH = /usr/local/bin
 
 .PHONY: build run release install uninstall clean

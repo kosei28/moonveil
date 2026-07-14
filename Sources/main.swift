@@ -52,7 +52,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func updateIcon() {
         guard let button = statusItem.button else { return }
         let name = active ? "moon.zzz.fill" : "moon.zzz"
-        let image = NSImage(systemSymbolName: name, accessibilityDescription: "netafuri")
+        let image = NSImage(systemSymbolName: name, accessibilityDescription: "moonveil")
         image?.isTemplate = true
         button.image = image
     }
