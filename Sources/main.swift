@@ -2,8 +2,16 @@ import Foundation
 import IOKit
 import IOKit.pwr_mgt
 
+// iokit_common_msg(x) = 0xe0000000 | x  (sys_iokit << 26 | sub_iokit_common << 14 | x)
+private let kMsgCanSystemSleep:  UInt32 = 0xe0000270
+private let kMsgSystemWillSleep: UInt32 = 0xe0000280
+
 final class Netafuri {
     private var sleepAssertionID: IOPMAssertionID = 0
+    private var rootPort: io_connect_t = 0
+    private var notifyPortRef: IONotificationPortRef?
+    private var notifierObject: io_object_t = 0
+    private var clamshellSleepWasDisabled = false
     private var lidWasClosed = false
     private var lidTimer: DispatchSourceTimer?
     private var signalSources: [DispatchSourceSignal] = []
@@ -14,7 +22,15 @@ final class Netafuri {
         print("  Ctrl+C to quit")
         print("")
 
-        preventSleep()
+        if !disableClamshellSleep() {
+            print("[error] could not disable clamshell sleep")
+            print("  root required: sudo swift run netafuri")
+            print("  or:            make run-sudo")
+            exit(1)
+        }
+
+        createSleepAssertion()
+        registerPowerCallbacks()
 
         lidWasClosed = isClamshellClosed()
         if lidWasClosed {
@@ -28,19 +44,100 @@ final class Netafuri {
         dispatchMain()
     }
 
-    // MARK: - Sleep Prevention
+    // MARK: - Clamshell Sleep Control
 
-    private func preventSleep() {
+    private func disableClamshellSleep() -> Bool {
+        let service = IOServiceGetMatchingService(
+            kIOMainPortDefault,
+            IOServiceMatching("IOPMrootDomain")
+        )
+        guard service != 0 else { return false }
+        defer { IOObjectRelease(service) }
+
+        let result = IORegistryEntrySetCFProperty(
+            service,
+            "AppleClamshellSleepDisabled" as CFString,
+            kCFBooleanTrue
+        )
+
+        if result == kIOReturnSuccess {
+            clamshellSleepWasDisabled = true
+            print("[ok] clamshell sleep disabled")
+            return true
+        }
+        return false
+    }
+
+    private func restoreClamshellSleep() {
+        guard clamshellSleepWasDisabled else { return }
+        let service = IOServiceGetMatchingService(
+            kIOMainPortDefault,
+            IOServiceMatching("IOPMrootDomain")
+        )
+        guard service != 0 else { return }
+        defer { IOObjectRelease(service) }
+
+        IORegistryEntrySetCFProperty(
+            service,
+            "AppleClamshellSleepDisabled" as CFString,
+            kCFBooleanFalse
+        )
+        clamshellSleepWasDisabled = false
+        print("[ok] clamshell sleep re-enabled")
+    }
+
+    // MARK: - Power Assertion (idle sleep prevention)
+
+    private func createSleepAssertion() {
         let result = IOPMAssertionCreateWithName(
-            "PreventSystemSleep" as CFString,
+            "PreventUserIdleSystemSleep" as CFString,
             IOPMAssertionLevel(kIOPMAssertionLevelOn),
-            "netafuri: keeping system awake on lid close" as CFString,
+            "netafuri" as CFString,
             &sleepAssertionID
         )
         if result == kIOReturnSuccess {
-            print("[ok] sleep prevention active")
+            print("[ok] idle sleep assertion active")
         } else {
-            print("[warn] could not create sleep assertion - try running with sudo")
+            print("[warn] could not create idle sleep assertion")
+        }
+    }
+
+    // MARK: - Power Notifications (veto sleep requests)
+
+    private func registerPowerCallbacks() {
+        let callback: IOServiceInterestCallback = { refcon, _, messageType, messageArgument in
+            guard let refcon = refcon else { return }
+            let app = Unmanaged<Netafuri>.fromOpaque(refcon).takeUnretainedValue()
+            app.handlePowerEvent(messageType, argument: messageArgument)
+        }
+
+        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
+        rootPort = IORegisterForSystemPower(
+            selfPtr,
+            &notifyPortRef,
+            callback,
+            &notifierObject
+        )
+
+        guard rootPort != 0, let port = notifyPortRef else {
+            print("[warn] could not register power callbacks")
+            return
+        }
+
+        let source = IONotificationPortGetRunLoopSource(port).takeUnretainedValue()
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .defaultMode)
+        print("[ok] power event callbacks registered")
+    }
+
+    private func handlePowerEvent(_ messageType: UInt32, argument: UnsafeMutableRawPointer?) {
+        let notificationID = Int(bitPattern: argument)
+        switch messageType {
+        case kMsgCanSystemSleep:
+            IOCancelPowerChange(rootPort, notificationID)
+        case kMsgSystemWillSleep:
+            IOAllowPowerChange(rootPort, notificationID)
+        default:
+            break
         }
     }
 
@@ -91,8 +188,9 @@ final class Netafuri {
     // MARK: - Lid Events
 
     private func onLidClose() {
-        print("[event] lid closed -> locking screen & blanking display")
+        print("[event] lid closed -> locking & blanking")
         lockScreen()
+        usleep(300_000)
         blankDisplay()
     }
 
@@ -100,28 +198,43 @@ final class Netafuri {
         print("[event] lid opened")
     }
 
-    // MARK: - Lock Screen (private API)
+    // MARK: - Lock Screen
 
     private func lockScreen() {
-        let paths = [
+        let frameworkPaths = [
             "/System/Library/PrivateFrameworks/login.framework/Versions/Current/login",
             "/System/Library/PrivateFrameworks/login.framework/login",
         ]
 
-        for path in paths {
+        for path in frameworkPaths {
             guard let handle = dlopen(path, RTLD_LAZY) else { continue }
             defer { dlclose(handle) }
-
             guard let sym = dlsym(handle, "SACLockScreenImmediate") else { continue }
 
             typealias LockFunc = @convention(c) () -> Void
             let lock = unsafeBitCast(sym, to: LockFunc.self)
             lock()
-            print("  [ok] screen locked")
+            print("  [ok] screen locked (SACLockScreenImmediate)")
             return
         }
 
-        print("  [warn] could not lock screen (SACLockScreenImmediate unavailable)")
+        let cgSessionPath = "/System/Library/CoreServices/Menu Extras/User.menu/Contents/Resources/CGSession"
+        if FileManager.default.fileExists(atPath: cgSessionPath) {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: cgSessionPath)
+            p.arguments = ["-suspend"]
+            p.standardOutput = FileHandle.nullDevice
+            p.standardError = FileHandle.nullDevice
+            if (try? p.run()) != nil {
+                p.waitUntilExit()
+                if p.terminationStatus == 0 {
+                    print("  [ok] screen locked (CGSession)")
+                    return
+                }
+            }
+        }
+
+        print("  [warn] could not lock screen")
     }
 
     // MARK: - Display Blanking
@@ -190,9 +303,17 @@ final class Netafuri {
 
     private func shutdown() {
         print("\n[exit] shutting down...")
+        restoreClamshellSleep()
         if sleepAssertionID != 0 {
             IOPMAssertionRelease(sleepAssertionID)
             print("[ok] sleep assertion released")
+        }
+        if rootPort != 0 {
+            IODeregisterForSystemPower(&notifierObject)
+            print("[ok] power callbacks deregistered")
+        }
+        if let port = notifyPortRef {
+            IONotificationPortDestroy(port)
         }
         exit(0)
     }
