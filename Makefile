@@ -1,7 +1,9 @@
 BINARY_NAME = moonveil
-INSTALL_PATH = /usr/local/bin
+APP_NAME = Moonveil.app
+APP_DIR = $(APP_NAME)/Contents/MacOS
+INSTALL_PATH = /Applications
 
-.PHONY: build run release install uninstall clean
+.PHONY: build run release app install uninstall clean
 
 build:
 	swift build
@@ -12,14 +14,22 @@ run:
 release:
 	swift build -c release
 
-install: release
-	sudo cp .build/release/$(BINARY_NAME) $(INSTALL_PATH)/$(BINARY_NAME)
-	@echo "installed to $(INSTALL_PATH)/$(BINARY_NAME)"
+app: release
+	mkdir -p $(APP_DIR)
+	cp .build/release/$(BINARY_NAME) $(APP_DIR)/$(BINARY_NAME)
+	/usr/libexec/PlistBuddy -c "Add :CFBundleExecutable string $(BINARY_NAME)" $(APP_NAME)/Contents/Info.plist 2>/dev/null || true
+	/usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string com.moonveil.app" $(APP_NAME)/Contents/Info.plist 2>/dev/null || true
+	/usr/libexec/PlistBuddy -c "Add :CFBundleName string Moonveil" $(APP_NAME)/Contents/Info.plist 2>/dev/null || true
+	/usr/libexec/PlistBuddy -c "Add :LSUIElement bool true" $(APP_NAME)/Contents/Info.plist 2>/dev/null || true
+
+install: app
+	cp -r $(APP_NAME) $(INSTALL_PATH)/$(APP_NAME)
+	@echo "installed to $(INSTALL_PATH)/$(APP_NAME)"
 
 uninstall:
-	sudo rm -f $(INSTALL_PATH)/$(BINARY_NAME)
-	@echo "removed $(INSTALL_PATH)/$(BINARY_NAME)"
+	rm -rf $(INSTALL_PATH)/$(APP_NAME)
+	@echo "removed $(INSTALL_PATH)/$(APP_NAME)"
 
 clean:
 	swift package clean
-	rm -rf .build
+	rm -rf .build $(APP_NAME)
