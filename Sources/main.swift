@@ -3,17 +3,15 @@ import IOKit
 import IOKit.pwr_mgt
 
 // iokit_common_msg(x) = 0xe0000000 | x
-private let kMsgCanSystemSleep:       UInt32 = 0xe0000270
-private let kMsgSystemWillSleep:      UInt32 = 0xe0000280
-private let kMsgClamshellStateChange: UInt32 = 0xe0000340
+private let kMsgCanSystemSleep:  UInt32 = 0xe0000270
+private let kMsgSystemWillSleep: UInt32 = 0xe0000280
 
 final class Netafuri {
     private var rootPort: io_connect_t = 0
     private var powerNotifyPort: IONotificationPortRef?
     private var powerNotifier: io_object_t = 0
-    private var lidNotifyPort: IONotificationPortRef?
-    private var lidNotifier: io_object_t = 0
     private var lidWasClosed = false
+    private var lidTimer: DispatchSourceTimer?
     private var signalSources: [DispatchSourceSignal] = []
 
     func run() {
@@ -30,7 +28,6 @@ final class Netafuri {
         print("[ok] sleep disabled (pmset)")
 
         registerPowerCallbacks()
-        registerLidNotification()
 
         lidWasClosed = isClamshellClosed()
         if lidWasClosed {
@@ -38,6 +35,7 @@ final class Netafuri {
         }
 
         setupSignalHandlers()
+        startLidMonitor()
 
         print("[ready] monitoring lid state...")
         dispatchMain()
@@ -100,51 +98,21 @@ final class Netafuri {
         }
     }
 
-    // MARK: - Lid State Notification
+    // MARK: - Lid Monitoring (poll AppleClamshellState)
+    // IOKit notification for clamshell state change does not fire
+    // when disablesleep is active, so we poll the property instead.
 
-    private func registerLidNotification() {
-        let service = IOServiceGetMatchingService(
-            kIOMainPortDefault,
-            IOServiceMatching("IOPMrootDomain")
-        )
-        guard service != 0 else {
-            print("[warn] IOPMrootDomain not found for lid monitoring")
-            return
+    private func startLidMonitor() {
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now(), repeating: .milliseconds(500))
+        timer.setEventHandler { [weak self] in
+            self?.pollLidState()
         }
-        defer { IOObjectRelease(service) }
-
-        lidNotifyPort = IONotificationPortCreate(kIOMainPortDefault)
-        guard let port = lidNotifyPort else {
-            print("[warn] could not create lid notification port")
-            return
-        }
-
-        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
-        let callback: IOServiceInterestCallback = { refcon, _, messageType, _ in
-            guard let refcon = refcon, messageType == kMsgClamshellStateChange else { return }
-            let app = Unmanaged<Netafuri>.fromOpaque(refcon).takeUnretainedValue()
-            app.handleLidStateChange()
-        }
-
-        let result = IOServiceAddInterestNotification(
-            port,
-            service,
-            kIOGeneralInterest,
-            callback,
-            selfPtr,
-            &lidNotifier
-        )
-        guard result == kIOReturnSuccess else {
-            print("[warn] could not register lid notification")
-            return
-        }
-
-        let source = IONotificationPortGetRunLoopSource(port).takeUnretainedValue()
-        CFRunLoopAddSource(CFRunLoopGetMain(), source, .defaultMode)
-        print("[ok] lid state notification registered")
+        timer.resume()
+        lidTimer = timer
     }
 
-    private func handleLidStateChange() {
+    private func pollLidState() {
         let closed = isClamshellClosed()
         if closed && !lidWasClosed {
             onLidClose()
@@ -153,8 +121,6 @@ final class Netafuri {
         }
         lidWasClosed = closed
     }
-
-    // MARK: - Clamshell State
 
     private func isClamshellClosed() -> Bool {
         let service = IOServiceGetMatchingService(
@@ -284,12 +250,6 @@ final class Netafuri {
             IODeregisterForSystemPower(&powerNotifier)
         }
         if let port = powerNotifyPort {
-            IONotificationPortDestroy(port)
-        }
-        if lidNotifier != 0 {
-            IOObjectRelease(lidNotifier)
-        }
-        if let port = lidNotifyPort {
             IONotificationPortDestroy(port)
         }
         exit(0)
