@@ -27,6 +27,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusItem()
         lidWasClosed = isClamshellClosed()
+
+        if UserDefaults.standard.bool(forKey: "enabled") {
+            activate()
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -108,6 +112,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         active = true
         toggleItem.title = "Disable"
         updateIcon()
+        UserDefaults.standard.set(true, forKey: "enabled")
     }
 
     private func deactivate() {
@@ -131,6 +136,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         active = false
         toggleItem.title = "Enable"
         updateIcon()
+        UserDefaults.standard.set(false, forKey: "enabled")
     }
 
     // MARK: - Privileged Execution
