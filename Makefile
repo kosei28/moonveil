@@ -15,6 +15,7 @@ release:
 	swift build -c release
 
 app: release
+	rm -rf $(APP_NAME)
 	mkdir -p $(APP_DIR)
 	cp .build/release/$(BINARY_NAME) $(APP_DIR)/$(BINARY_NAME)
 	/usr/libexec/PlistBuddy -c "Add :CFBundleExecutable string $(BINARY_NAME)" $(APP_NAME)/Contents/Info.plist 2>/dev/null || true
