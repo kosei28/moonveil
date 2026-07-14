@@ -3,15 +3,17 @@ import IOKit
 import IOKit.pwr_mgt
 
 // iokit_common_msg(x) = 0xe0000000 | x
-private let kMsgCanSystemSleep:  UInt32 = 0xe0000270
-private let kMsgSystemWillSleep: UInt32 = 0xe0000280
+private let kMsgCanSystemSleep:       UInt32 = 0xe0000270
+private let kMsgSystemWillSleep:      UInt32 = 0xe0000280
+private let kMsgClamshellStateChange: UInt32 = 0xe0000340
 
 final class Netafuri {
     private var rootPort: io_connect_t = 0
-    private var notifyPortRef: IONotificationPortRef?
-    private var notifierObject: io_object_t = 0
+    private var powerNotifyPort: IONotificationPortRef?
+    private var powerNotifier: io_object_t = 0
+    private var lidNotifyPort: IONotificationPortRef?
+    private var lidNotifier: io_object_t = 0
     private var lidWasClosed = false
-    private var lidTimer: DispatchSourceTimer?
     private var signalSources: [DispatchSourceSignal] = []
 
     func run() {
@@ -28,6 +30,7 @@ final class Netafuri {
         print("[ok] sleep disabled (pmset)")
 
         registerPowerCallbacks()
+        registerLidNotification()
 
         lidWasClosed = isClamshellClosed()
         if lidWasClosed {
@@ -35,13 +38,12 @@ final class Netafuri {
         }
 
         setupSignalHandlers()
-        startLidMonitor()
 
         print("[ready] monitoring lid state...")
         dispatchMain()
     }
 
-    // MARK: - pmset helper
+    // MARK: - pmset
 
     @discardableResult
     private func pmset(_ args: [String]) -> Bool {
@@ -59,7 +61,7 @@ final class Netafuri {
         }
     }
 
-    // MARK: - Power Notifications (veto sleep requests)
+    // MARK: - Power Callbacks (veto sleep requests)
 
     private func registerPowerCallbacks() {
         let callback: IOServiceInterestCallback = { refcon, _, messageType, messageArgument in
@@ -71,12 +73,12 @@ final class Netafuri {
         let selfPtr = Unmanaged.passUnretained(self).toOpaque()
         rootPort = IORegisterForSystemPower(
             selfPtr,
-            &notifyPortRef,
+            &powerNotifyPort,
             callback,
-            &notifierObject
+            &powerNotifier
         )
 
-        guard rootPort != 0, let port = notifyPortRef else {
+        guard rootPort != 0, let port = powerNotifyPort else {
             print("[warn] could not register power callbacks")
             return
         }
@@ -98,29 +100,61 @@ final class Netafuri {
         }
     }
 
-    // MARK: - Lid Monitoring
+    // MARK: - Lid State Notification
 
-    private func startLidMonitor() {
-        let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.schedule(deadline: .now(), repeating: .milliseconds(500))
-        timer.setEventHandler { [weak self] in
-            self?.pollLidState()
+    private func registerLidNotification() {
+        let service = IOServiceGetMatchingService(
+            kIOMainPortDefault,
+            IOServiceMatching("IOPMrootDomain")
+        )
+        guard service != 0 else {
+            print("[warn] IOPMrootDomain not found for lid monitoring")
+            return
         }
-        timer.resume()
-        lidTimer = timer
+        defer { IOObjectRelease(service) }
+
+        lidNotifyPort = IONotificationPortCreate(kIOMainPortDefault)
+        guard let port = lidNotifyPort else {
+            print("[warn] could not create lid notification port")
+            return
+        }
+
+        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
+        let callback: IOServiceInterestCallback = { refcon, _, messageType, _ in
+            guard let refcon = refcon, messageType == kMsgClamshellStateChange else { return }
+            let app = Unmanaged<Netafuri>.fromOpaque(refcon).takeUnretainedValue()
+            app.handleLidStateChange()
+        }
+
+        let result = IOServiceAddInterestNotification(
+            port,
+            service,
+            kIOGeneralInterest,
+            callback,
+            selfPtr,
+            &lidNotifier
+        )
+        guard result == kIOReturnSuccess else {
+            print("[warn] could not register lid notification")
+            return
+        }
+
+        let source = IONotificationPortGetRunLoopSource(port).takeUnretainedValue()
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .defaultMode)
+        print("[ok] lid state notification registered")
     }
 
-    private func pollLidState() {
+    private func handleLidStateChange() {
         let closed = isClamshellClosed()
-
         if closed && !lidWasClosed {
             onLidClose()
         } else if !closed && lidWasClosed {
             onLidOpen()
         }
-
         lidWasClosed = closed
     }
+
+    // MARK: - Clamshell State
 
     private func isClamshellClosed() -> Bool {
         let service = IOServiceGetMatchingService(
@@ -247,10 +281,15 @@ final class Netafuri {
         pmset(["disablesleep", "0"])
         print("[ok] sleep re-enabled (pmset)")
         if rootPort != 0 {
-            IODeregisterForSystemPower(&notifierObject)
-            print("[ok] power callbacks deregistered")
+            IODeregisterForSystemPower(&powerNotifier)
         }
-        if let port = notifyPortRef {
+        if let port = powerNotifyPort {
+            IONotificationPortDestroy(port)
+        }
+        if lidNotifier != 0 {
+            IOObjectRelease(lidNotifier)
+        }
+        if let port = lidNotifyPort {
             IONotificationPortDestroy(port)
         }
         exit(0)
