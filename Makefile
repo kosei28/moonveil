@@ -29,6 +29,7 @@ install: app
 		killall $(BINARY_NAME); \
 		sleep 1; \
 	fi
+	rm -rf $(INSTALL_PATH)/$(APP_NAME)
 	cp -r $(APP_NAME) $(INSTALL_PATH)/$(APP_NAME)
 	open $(INSTALL_PATH)/$(APP_NAME)
 	@echo "installed to $(INSTALL_PATH)/$(APP_NAME)"
