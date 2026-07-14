@@ -9,10 +9,6 @@ build:
 run:
 	swift run $(BINARY_NAME)
 
-run-sudo:
-	swift build
-	sudo .build/debug/$(BINARY_NAME)
-
 release:
 	swift build -c release
 

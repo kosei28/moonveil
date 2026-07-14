@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 import IOKit
 import IOKit.pwr_mgt
 
@@ -6,57 +6,121 @@ import IOKit.pwr_mgt
 private let kMsgCanSystemSleep:  UInt32 = 0xe0000270
 private let kMsgSystemWillSleep: UInt32 = 0xe0000280
 
-final class Netafuri {
+class AppDelegate: NSObject, NSApplicationDelegate {
+    private var statusItem: NSStatusItem!
+    private var toggleItem: NSMenuItem!
+    private var active = false
+
     private var rootPort: io_connect_t = 0
     private var powerNotifyPort: IONotificationPortRef?
     private var powerNotifier: io_object_t = 0
     private var lidWasClosed = false
     private var lidTimer: DispatchSourceTimer?
-    private var signalSources: [DispatchSourceSignal] = []
 
-    func run() {
-        print("netafuri - pretending to sleep")
-        print("  lid close -> lock + display off + prevent sleep")
-        print("  Ctrl+C to quit")
-        print("")
+    // MARK: - App Lifecycle
 
-        if !pmset(["disablesleep", "1"]) {
-            print("[error] pmset disablesleep 1 failed")
-            print("  try: make run-sudo")
-            exit(1)
-        }
-        print("[ok] sleep disabled (pmset)")
-
-        registerPowerCallbacks()
-
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        setupStatusItem()
         lidWasClosed = isClamshellClosed()
-        if lidWasClosed {
-            print("[info] lid is currently closed")
-        }
-
-        setupSignalHandlers()
-        startLidMonitor()
-
-        print("[ready] monitoring lid state...")
-        dispatchMain()
     }
 
-    // MARK: - pmset
+    func applicationWillTerminate(_ notification: Notification) {
+        if active { deactivate() }
+    }
+
+    // MARK: - Menu Bar
+
+    private func setupStatusItem() {
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        updateIcon()
+
+        let menu = NSMenu()
+
+        toggleItem = NSMenuItem(title: "Enable", action: #selector(toggle), keyEquivalent: "")
+        toggleItem.target = self
+        menu.addItem(toggleItem)
+
+        menu.addItem(.separator())
+
+        let quit = NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q")
+        quit.target = self
+        menu.addItem(quit)
+
+        statusItem.menu = menu
+    }
+
+    private func updateIcon() {
+        guard let button = statusItem.button else { return }
+        let name = active ? "moon.zzz.fill" : "moon.zzz"
+        let image = NSImage(systemSymbolName: name, accessibilityDescription: "netafuri")
+        image?.isTemplate = true
+        button.image = image
+    }
+
+    // MARK: - Toggle
+
+    @objc private func toggle() {
+        if active {
+            deactivate()
+        } else {
+            activate()
+        }
+    }
+
+    @objc private func quitApp() {
+        if active { deactivate() }
+        NSApp.terminate(nil)
+    }
+
+    // MARK: - Activate / Deactivate
+
+    private func activate() {
+        guard !active else { return }
+
+        guard runPrivileged("pmset disablesleep 1") else { return }
+
+        registerPowerCallbacks()
+        startLidMonitor()
+
+        active = true
+        toggleItem.title = "Disable"
+        updateIcon()
+    }
+
+    private func deactivate() {
+        guard active else { return }
+
+        lidTimer?.cancel()
+        lidTimer = nil
+
+        if rootPort != 0 {
+            IODeregisterForSystemPower(&powerNotifier)
+            rootPort = 0
+            powerNotifier = 0
+        }
+        if let port = powerNotifyPort {
+            IONotificationPortDestroy(port)
+            powerNotifyPort = nil
+        }
+
+        runPrivileged("pmset disablesleep 0")
+
+        active = false
+        toggleItem.title = "Enable"
+        updateIcon()
+    }
+
+    // MARK: - Privileged Execution
 
     @discardableResult
-    private func pmset(_ args: [String]) -> Bool {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
-        p.arguments = args
-        p.standardOutput = FileHandle.nullDevice
-        p.standardError = FileHandle.nullDevice
-        do {
-            try p.run()
-            p.waitUntilExit()
-            return p.terminationStatus == 0
-        } catch {
-            return false
-        }
+    private func runPrivileged(_ command: String) -> Bool {
+        let escaped = command.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        let source = "do shell script \"\(escaped)\" with administrator privileges"
+        guard let script = NSAppleScript(source: source) else { return false }
+        var error: NSDictionary?
+        script.executeAndReturnError(&error)
+        return error == nil
     }
 
     // MARK: - Power Callbacks (veto sleep requests)
@@ -64,8 +128,8 @@ final class Netafuri {
     private func registerPowerCallbacks() {
         let callback: IOServiceInterestCallback = { refcon, _, messageType, messageArgument in
             guard let refcon = refcon else { return }
-            let app = Unmanaged<Netafuri>.fromOpaque(refcon).takeUnretainedValue()
-            app.handlePowerEvent(messageType, argument: messageArgument)
+            let d = Unmanaged<AppDelegate>.fromOpaque(refcon).takeUnretainedValue()
+            d.handlePowerEvent(messageType, argument: messageArgument)
         }
 
         let selfPtr = Unmanaged.passUnretained(self).toOpaque()
@@ -76,31 +140,25 @@ final class Netafuri {
             &powerNotifier
         )
 
-        guard rootPort != 0, let port = powerNotifyPort else {
-            print("[warn] could not register power callbacks")
-            return
-        }
+        guard rootPort != 0, let port = powerNotifyPort else { return }
 
         let source = IONotificationPortGetRunLoopSource(port).takeUnretainedValue()
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .defaultMode)
-        print("[ok] power event callbacks registered")
     }
 
     private func handlePowerEvent(_ messageType: UInt32, argument: UnsafeMutableRawPointer?) {
-        let notificationID = Int(bitPattern: argument)
+        let id = Int(bitPattern: argument)
         switch messageType {
         case kMsgCanSystemSleep:
-            IOCancelPowerChange(rootPort, notificationID)
+            IOCancelPowerChange(rootPort, id)
         case kMsgSystemWillSleep:
-            IOAllowPowerChange(rootPort, notificationID)
+            IOAllowPowerChange(rootPort, id)
         default:
             break
         }
     }
 
-    // MARK: - Lid Monitoring (poll AppleClamshellState)
-    // IOKit notification for clamshell state change does not fire
-    // when disablesleep is active, so we poll the property instead.
+    // MARK: - Lid Monitoring
 
     private func startLidMonitor() {
         let timer = DispatchSource.makeTimerSource(queue: .main)
@@ -135,9 +193,7 @@ final class Netafuri {
             "AppleClamshellState" as CFString,
             kCFAllocatorDefault,
             0
-        ) else {
-            return false
-        }
+        ) else { return false }
 
         return (prop.takeRetainedValue() as? Bool) ?? false
     }
@@ -145,33 +201,26 @@ final class Netafuri {
     // MARK: - Lid Events
 
     private func onLidClose() {
-        print("[event] lid closed -> locking & blanking")
         lockScreen()
         usleep(300_000)
         blankDisplay()
     }
 
-    private func onLidOpen() {
-        print("[event] lid opened")
-    }
+    private func onLidOpen() {}
 
     // MARK: - Lock Screen
 
     private func lockScreen() {
-        let frameworkPaths = [
+        let paths = [
             "/System/Library/PrivateFrameworks/login.framework/Versions/Current/login",
             "/System/Library/PrivateFrameworks/login.framework/login",
         ]
-
-        for path in frameworkPaths {
-            guard let handle = dlopen(path, RTLD_LAZY) else { continue }
-            defer { dlclose(handle) }
-            guard let sym = dlsym(handle, "SACLockScreenImmediate") else { continue }
+        for path in paths {
+            guard let handle = dlopen(path, RTLD_LAZY),
+                  let sym = dlsym(handle, "SACLockScreenImmediate") else { continue }
 
             typealias LockFunc = @convention(c) () -> Void
-            let lock = unsafeBitCast(sym, to: LockFunc.self)
-            lock()
-            print("  [ok] screen locked (SACLockScreenImmediate)")
+            unsafeBitCast(sym, to: LockFunc.self)()
             return
         }
 
@@ -182,79 +231,36 @@ final class Netafuri {
             p.arguments = ["-suspend"]
             p.standardOutput = FileHandle.nullDevice
             p.standardError = FileHandle.nullDevice
-            if (try? p.run()) != nil {
-                p.waitUntilExit()
-                if p.terminationStatus == 0 {
-                    print("  [ok] screen locked (CGSession)")
-                    return
-                }
-            }
+            try? p.run()
+            p.waitUntilExit()
         }
-
-        print("  [warn] could not lock screen")
     }
 
     // MARK: - Display Blanking
 
     private func blankDisplay() {
-        if blankViaDisplayWrangler() {
-            print("  [ok] display blanked (IODisplayWrangler)")
-            return
-        }
-
-        if pmset(["displaysleepnow"]) {
-            print("  [ok] display blanked (pmset)")
-            return
-        }
-
-        print("  [warn] could not blank display")
-    }
-
-    private func blankViaDisplayWrangler() -> Bool {
         let service = IOServiceGetMatchingService(
             kIOMainPortDefault,
             IOServiceMatching("IODisplayWrangler")
         )
-        guard service != 0 else { return false }
-        defer { IOObjectRelease(service) }
-
-        let result = IORegistryEntrySetCFProperty(
-            service,
-            "IORequestIdle" as CFString,
-            kCFBooleanTrue
-        )
-        return result == kIOReturnSuccess
-    }
-
-    // MARK: - Signal Handling
-
-    private func setupSignalHandlers() {
-        signal(SIGINT, SIG_IGN)
-        signal(SIGTERM, SIG_IGN)
-
-        for sig: Int32 in [SIGINT, SIGTERM] {
-            let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
-            source.setEventHandler { [weak self] in
-                self?.shutdown()
-            }
-            source.resume()
-            signalSources.append(source)
+        if service != 0 {
+            IORegistryEntrySetCFProperty(service, "IORequestIdle" as CFString, kCFBooleanTrue)
+            IOObjectRelease(service)
+            return
         }
-    }
 
-    private func shutdown() {
-        print("\n[exit] shutting down...")
-        pmset(["disablesleep", "0"])
-        print("[ok] sleep re-enabled (pmset)")
-        if rootPort != 0 {
-            IODeregisterForSystemPower(&powerNotifier)
-        }
-        if let port = powerNotifyPort {
-            IONotificationPortDestroy(port)
-        }
-        exit(0)
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
+        p.arguments = ["displaysleepnow"]
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        try? p.run()
+        p.waitUntilExit()
     }
 }
 
-let app = Netafuri()
+let app = NSApplication.shared
+app.setActivationPolicy(.accessory)
+let delegate = AppDelegate()
+app.delegate = delegate
 app.run()
