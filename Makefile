@@ -3,7 +3,7 @@ APP_NAME = Moonveil.app
 APP_DIR = $(APP_NAME)/Contents/MacOS
 INSTALL_PATH = /Applications
 
-.PHONY: build run release app install uninstall clean
+.PHONY: build run release app install update uninstall clean
 
 build:
 	swift build
@@ -23,7 +23,12 @@ app: release
 	/usr/libexec/PlistBuddy -c "Add :LSUIElement bool true" $(APP_NAME)/Contents/Info.plist 2>/dev/null || true
 
 install: app
+	@if pgrep -x $(BINARY_NAME) > /dev/null 2>&1; then \
+		killall $(BINARY_NAME); \
+		sleep 1; \
+	fi
 	cp -r $(APP_NAME) $(INSTALL_PATH)/$(APP_NAME)
+	open $(INSTALL_PATH)/$(APP_NAME)
 	@echo "installed to $(INSTALL_PATH)/$(APP_NAME)"
 
 uninstall:
