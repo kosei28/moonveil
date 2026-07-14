@@ -1,6 +1,7 @@
 import AppKit
 import IOKit
 import IOKit.pwr_mgt
+import Security
 
 // iokit_common_msg(x) = 0xe0000000 | x
 private let kMsgCanSystemSleep:  UInt32 = 0xe0000270
@@ -154,7 +155,58 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             "chown root:wheel \(sudoersPath) && " +
             "chmod 0440 \(sudoersPath) && " +
             "rm -f \(tmpPath)"
-        return runPrivilegedAppleScript(cmd)
+        return runPrivileged(cmd)
+    }
+
+    private func runPrivileged(_ command: String) -> Bool {
+        // AuthorizationCreate shows the macOS auth dialog with Touch ID support
+        var authRef: AuthorizationRef?
+        let status = AuthorizationCreate(nil, nil, [], &authRef)
+        guard status == errAuthorizationSuccess, let auth = authRef else { return false }
+        defer { AuthorizationFree(auth, [.destroyRights]) }
+
+        let rightName = strdup("system.privilege.admin")!
+        defer { free(rightName) }
+        var item = AuthorizationItem(name: rightName, valueLength: 0, value: nil, flags: 0)
+        let flags: AuthorizationFlags = [.interactionAllowed, .preAuthorize, .extendRights]
+
+        let copyStatus = withUnsafeMutablePointer(to: &item) { ptr in
+            var rights = AuthorizationRights(count: 1, items: ptr)
+            return AuthorizationCopyRights(auth, &rights, nil, flags, nil)
+        }
+        guard copyStatus == errAuthorizationSuccess else { return false }
+
+        // AuthorizationExecuteWithPrivileges is deprecated but still present in dylib
+        guard let sym = dlsym(dlopen(nil, RTLD_LAZY), "AuthorizationExecuteWithPrivileges") else {
+            return runPrivilegedAppleScript(command)
+        }
+
+        typealias AuthExecFn = @convention(c) (
+            AuthorizationRef,
+            UnsafePointer<CChar>,
+            AuthorizationFlags,
+            UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>,
+            UnsafeMutablePointer<UnsafeMutablePointer<FILE>?>?
+        ) -> OSStatus
+
+        let authExec = unsafeBitCast(sym, to: AuthExecFn.self)
+
+        let cArg0 = strdup("-c")!
+        let cArg1 = strdup(command)!
+        defer { free(cArg0); free(cArg1) }
+        var args: [UnsafeMutablePointer<CChar>?] = [cArg0, cArg1, nil]
+
+        var pipe: UnsafeMutablePointer<FILE>?
+        let execStatus = authExec(auth, "/bin/sh", [], &args, &pipe)
+
+        if let pipe = pipe {
+            while fgetc(pipe) != EOF {}
+            fclose(pipe)
+        }
+        var childStatus: Int32 = 0
+        wait(&childStatus)
+
+        return execStatus == errAuthorizationSuccess
     }
 
     private func runPrivilegedAppleScript(_ command: String) -> Bool {
