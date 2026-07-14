@@ -10,21 +10,33 @@ private let kMsgSystemWillSleep: UInt32 = 0xe0000280
 private let sudoersPath = "/etc/sudoers.d/moonveil"
 private let sudoersRule = "%admin ALL=(root) NOPASSWD: /usr/bin/pmset disablesleep 0, /usr/bin/pmset disablesleep 1\n"
 
+enum LidAction: Int {
+    case lockScreen = 0
+    case clamshell = 1
+}
+
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var toggleItem: NSMenuItem!
+    private var lockScreenItem: NSMenuItem!
+    private var clamshellItem: NSMenuItem!
     private var loginItem: NSMenuItem!
     private var active = false
+    private var lidAction: LidAction = .lockScreen
 
     private var rootPort: io_connect_t = 0
     private var powerNotifyPort: IONotificationPortRef?
     private var powerNotifier: io_object_t = 0
     private var lidWasClosed = false
     private var lidTimer: DispatchSourceTimer?
+    private var screenCountBeforeLidClose = 0
 
     // MARK: - App Lifecycle
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if let saved = LidAction(rawValue: UserDefaults.standard.integer(forKey: "lidAction")) {
+            lidAction = saved
+        }
         setupStatusItem()
         lidWasClosed = isClamshellClosed()
 
@@ -48,6 +60,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         toggleItem = NSMenuItem(title: "Enable", action: #selector(toggle), keyEquivalent: "")
         toggleItem.target = self
         menu.addItem(toggleItem)
+
+        menu.addItem(.separator())
+
+        lockScreenItem = NSMenuItem(title: "Lock Screen", action: #selector(selectLockScreen), keyEquivalent: "")
+        lockScreenItem.target = self
+        menu.addItem(lockScreenItem)
+
+        clamshellItem = NSMenuItem(title: "Clamshell", action: #selector(selectClamshell), keyEquivalent: "")
+        clamshellItem.target = self
+        menu.addItem(clamshellItem)
+
+        updateModeMenu()
 
         menu.addItem(.separator())
 
@@ -83,6 +107,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             activate()
             if active { UserDefaults.standard.set(true, forKey: "enabled") }
         }
+    }
+
+    @objc private func selectLockScreen() {
+        lidAction = .lockScreen
+        UserDefaults.standard.set(lidAction.rawValue, forKey: "lidAction")
+        updateModeMenu()
+    }
+
+    @objc private func selectClamshell() {
+        lidAction = .clamshell
+        UserDefaults.standard.set(lidAction.rawValue, forKey: "lidAction")
+        updateModeMenu()
+    }
+
+    private func updateModeMenu() {
+        lockScreenItem.state = lidAction == .lockScreen ? .on : .off
+        clamshellItem.state = lidAction == .clamshell ? .on : .off
     }
 
     @objc private func toggleLogin() {
@@ -243,6 +284,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func pollLidState() {
         let closed = isClamshellClosed()
+        if !closed {
+            screenCountBeforeLidClose = NSScreen.screens.count
+        }
         if closed && !lidWasClosed {
             onLidClose()
         } else if !closed && lidWasClosed {
@@ -272,6 +316,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Lid Events
 
     private func onLidClose() {
+        let hasExternalDisplay = screenCountBeforeLidClose > 1
+        if lidAction == .clamshell && hasExternalDisplay {
+            return
+        }
         lockScreen()
         usleep(300_000)
         blankDisplay()
