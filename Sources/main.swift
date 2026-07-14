@@ -7,11 +7,9 @@ private let kMsgCanSystemSleep:  UInt32 = 0xe0000270
 private let kMsgSystemWillSleep: UInt32 = 0xe0000280
 
 final class Netafuri {
-    private var sleepAssertionID: IOPMAssertionID = 0
     private var rootPort: io_connect_t = 0
     private var notifyPortRef: IONotificationPortRef?
     private var notifierObject: io_object_t = 0
-    private var pmsetDisabledSleep = false
     private var lidWasClosed = false
     private var lidTimer: DispatchSourceTimer?
     private var signalSources: [DispatchSourceSignal] = []
@@ -22,12 +20,12 @@ final class Netafuri {
         print("  Ctrl+C to quit")
         print("")
 
-        let ok = disableSleep()
-        if !ok {
-            print("[error] could not disable sleep")
+        if !pmset(["disablesleep", "1"]) {
+            print("[error] pmset disablesleep 1 failed")
             print("  try: make run-sudo")
             exit(1)
         }
+        print("[ok] sleep disabled (pmset)")
 
         registerPowerCallbacks()
 
@@ -43,72 +41,10 @@ final class Netafuri {
         dispatchMain()
     }
 
-    // MARK: - Sleep Prevention
-
-    private func disableSleep() -> Bool {
-        var anySuccess = false
-
-        // 1) IOPMrootDomain property (may be blocked by SIP)
-        if setClamshellSleepDisabled(true) {
-            print("[ok] AppleClamshellSleepDisabled = true")
-            anySuccess = true
-        }
-
-        // 2) pmset disablesleep (has special entitlements, works under SIP)
-        if runPmset(["disablesleep", "1"]) {
-            pmsetDisabledSleep = true
-            print("[ok] pmset disablesleep 1")
-            anySuccess = true
-        }
-
-        // 3) IOPMAssertion as additional guard
-        let result = IOPMAssertionCreateWithName(
-            "PreventUserIdleSystemSleep" as CFString,
-            IOPMAssertionLevel(kIOPMAssertionLevelOn),
-            "netafuri" as CFString,
-            &sleepAssertionID
-        )
-        if result == kIOReturnSuccess {
-            print("[ok] idle sleep assertion active")
-            anySuccess = true
-        }
-
-        return anySuccess
-    }
-
-    private func restoreSleep() {
-        setClamshellSleepDisabled(false)
-        if pmsetDisabledSleep {
-            runPmset(["disablesleep", "0"])
-            pmsetDisabledSleep = false
-            print("[ok] pmset disablesleep 0")
-        }
-        if sleepAssertionID != 0 {
-            IOPMAssertionRelease(sleepAssertionID)
-            sleepAssertionID = 0
-            print("[ok] sleep assertion released")
-        }
-    }
+    // MARK: - pmset helper
 
     @discardableResult
-    private func setClamshellSleepDisabled(_ disabled: Bool) -> Bool {
-        let service = IOServiceGetMatchingService(
-            kIOMainPortDefault,
-            IOServiceMatching("IOPMrootDomain")
-        )
-        guard service != 0 else { return false }
-        defer { IOObjectRelease(service) }
-
-        let result = IORegistryEntrySetCFProperty(
-            service,
-            "AppleClamshellSleepDisabled" as CFString,
-            disabled ? kCFBooleanTrue : kCFBooleanFalse
-        )
-        return result == kIOReturnSuccess
-    }
-
-    @discardableResult
-    private func runPmset(_ args: [String]) -> Bool {
+    private func pmset(_ args: [String]) -> Bool {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
         p.arguments = args
@@ -266,7 +202,7 @@ final class Netafuri {
             return
         }
 
-        if blankViaPmset() {
+        if pmset(["displaysleepnow"]) {
             print("  [ok] display blanked (pmset)")
             return
         }
@@ -290,10 +226,6 @@ final class Netafuri {
         return result == kIOReturnSuccess
     }
 
-    private func blankViaPmset() -> Bool {
-        return runPmset(["displaysleepnow"])
-    }
-
     // MARK: - Signal Handling
 
     private func setupSignalHandlers() {
@@ -312,7 +244,8 @@ final class Netafuri {
 
     private func shutdown() {
         print("\n[exit] shutting down...")
-        restoreSleep()
+        pmset(["disablesleep", "0"])
+        print("[ok] sleep re-enabled (pmset)")
         if rootPort != 0 {
             IODeregisterForSystemPower(&notifierObject)
             print("[ok] power callbacks deregistered")
