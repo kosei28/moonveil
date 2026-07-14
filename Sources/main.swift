@@ -6,6 +6,9 @@ import IOKit.pwr_mgt
 private let kMsgCanSystemSleep:  UInt32 = 0xe0000270
 private let kMsgSystemWillSleep: UInt32 = 0xe0000280
 
+private let sudoersPath = "/etc/sudoers.d/moonveil"
+private let sudoersRule = "%admin ALL=(root) NOPASSWD: /usr/bin/pmset disablesleep 0, /usr/bin/pmset disablesleep 1\n"
+
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var toggleItem: NSMenuItem!
@@ -76,8 +79,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func activate() {
         guard !active else { return }
-
-        guard runPrivileged("pmset disablesleep 1") else { return }
+        guard setDisableSleep(true) else { return }
 
         registerPowerCallbacks()
         startLidMonitor()
@@ -103,7 +105,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             powerNotifyPort = nil
         }
 
-        runPrivileged("pmset disablesleep 0")
+        setDisableSleep(false)
 
         active = false
         toggleItem.title = "Enable"
@@ -113,7 +115,49 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Privileged Execution
 
     @discardableResult
-    private func runPrivileged(_ command: String) -> Bool {
+    private func setDisableSleep(_ disable: Bool) -> Bool {
+        let value = disable ? "1" : "0"
+
+        if sudoNonInteractive(["pmset", "disablesleep", value]) {
+            return true
+        }
+
+        guard installSudoersRule() else { return false }
+
+        return sudoNonInteractive(["pmset", "disablesleep", value])
+    }
+
+    private func sudoNonInteractive(_ args: [String]) -> Bool {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
+        p.arguments = ["-n"] + args
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        do {
+            try p.run()
+            p.waitUntilExit()
+            return p.terminationStatus == 0
+        } catch {
+            return false
+        }
+    }
+
+    private func installSudoersRule() -> Bool {
+        let tmpPath = NSTemporaryDirectory() + "moonveil_sudoers"
+        guard FileManager.default.createFile(
+            atPath: tmpPath,
+            contents: sudoersRule.data(using: .utf8)
+        ) else { return false }
+
+        let cmd = "/usr/sbin/visudo -c -f \(tmpPath) 2>/dev/null && " +
+            "cp \(tmpPath) \(sudoersPath) && " +
+            "chown root:wheel \(sudoersPath) && " +
+            "chmod 0440 \(sudoersPath) && " +
+            "rm -f \(tmpPath)"
+        return runPrivilegedAppleScript(cmd)
+    }
+
+    private func runPrivilegedAppleScript(_ command: String) -> Bool {
         let escaped = command.replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
         let source = "do shell script \"\(escaped)\" with administrator privileges"

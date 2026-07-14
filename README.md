@@ -28,9 +28,11 @@ make run
 
 メニューバーに 🌙 アイコンが表示される。
 
-1. アイコンをクリック → **Enable** → パスワード入力 → スリープ抑止ON（アイコンが塗りつぶしに変わる）
+1. アイコンをクリック → **Enable** → 初回のみTouch ID / パスワード → スリープ抑止ON（アイコンが塗りつぶしに変わる）
 2. **Disable** で解除
 3. **Quit** で終了（自動で `disablesleep 0` に戻る）
+
+初回の認証で `/etc/sudoers.d/moonveil` にNOPASSWDルールがインストールされるため、2回目以降はダイアログなしで即座にON/OFFできる。`make uninstall` でルールも削除される。
 
 ### Enable中の挙動
 

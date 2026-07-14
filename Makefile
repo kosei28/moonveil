@@ -28,6 +28,7 @@ install: app
 
 uninstall:
 	rm -rf $(INSTALL_PATH)/$(APP_NAME)
+	sudo rm -f /etc/sudoers.d/moonveil
 	@echo "removed $(INSTALL_PATH)/$(APP_NAME)"
 
 clean:
