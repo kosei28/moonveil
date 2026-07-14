@@ -1,6 +1,7 @@
 import AppKit
 import IOKit
 import IOKit.pwr_mgt
+import ServiceManagement
 
 // iokit_common_msg(x) = 0xe0000000 | x
 private let kMsgCanSystemSleep:  UInt32 = 0xe0000270
@@ -12,6 +13,7 @@ private let sudoersRule = "%admin ALL=(root) NOPASSWD: /usr/bin/pmset disablesle
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var toggleItem: NSMenuItem!
+    private var loginItem: NSMenuItem!
     private var active = false
 
     private var rootPort: io_connect_t = 0
@@ -45,6 +47,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
 
+        loginItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLogin), keyEquivalent: "")
+        loginItem.target = self
+        loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        menu.addItem(loginItem)
+
+        menu.addItem(.separator())
+
         let quit = NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
@@ -68,6 +77,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             activate()
         }
+    }
+
+    @objc private func toggleLogin() {
+        do {
+            if SMAppService.mainApp.status == .enabled {
+                try SMAppService.mainApp.unregister()
+                loginItem.state = .off
+            } else {
+                try SMAppService.mainApp.register()
+                loginItem.state = .on
+            }
+        } catch {}
     }
 
     @objc private func quitApp() {
