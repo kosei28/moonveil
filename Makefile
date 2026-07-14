@@ -12,6 +12,7 @@ run:
 	swift run $(BINARY_NAME)
 
 release:
+	swift package clean
 	swift build -c release
 
 app: release
