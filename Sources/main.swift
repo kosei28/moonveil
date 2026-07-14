@@ -78,8 +78,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func toggle() {
         if active {
             deactivate()
+            UserDefaults.standard.set(false, forKey: "enabled")
         } else {
             activate()
+            if active { UserDefaults.standard.set(true, forKey: "enabled") }
         }
     }
 
@@ -112,7 +114,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         active = true
         toggleItem.title = "Disable"
         updateIcon()
-        UserDefaults.standard.set(true, forKey: "enabled")
     }
 
     private func deactivate() {
@@ -136,7 +137,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         active = false
         toggleItem.title = "Enable"
         updateIcon()
-        UserDefaults.standard.set(false, forKey: "enabled")
     }
 
     // MARK: - Privileged Execution
