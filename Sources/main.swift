@@ -104,7 +104,7 @@ final class Netafuri {
 
     private func startLidMonitor() {
         let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.schedule(deadline: .now(), repeating: .milliseconds(500))
+        timer.schedule(deadline: .now(), repeating: .seconds(1))
         timer.setEventHandler { [weak self] in
             self?.pollLidState()
         }
