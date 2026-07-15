@@ -37,6 +37,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var permissionItem: NSMenuItem!
     private var permissionTimer: DispatchSourceTimer?
     private var hidManager: IOHIDManager?
+    private var ledTimer: DispatchSourceTimer?
 
     // MARK: - App Lifecycle
 
@@ -320,6 +321,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         openHIDManager()
         setCapsLockRemapping(enabled: true)
         setCapsLockLED(on: active)
+
+        startLEDTimer()
+    }
+
+    private func startLEDTimer() {
+        guard ledTimer == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now(), repeating: .milliseconds(500))
+        timer.setEventHandler { [weak self] in
+            guard let self = self else { return }
+            self.setCapsLockLED(on: self.active)
+        }
+        timer.resume()
+        ledTimer = timer
+    }
+
+    private func stopLEDTimer() {
+        ledTimer?.cancel()
+        ledTimer = nil
     }
 
     private func openHIDManager() {
@@ -349,6 +369,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard capsLockToggleEnabled else { return }
 
         stopPermissionPolling()
+        stopLEDTimer()
 
         if let tap = eventTap {
             CGEvent.tapEnable(tap: tap, enable: false)
