@@ -394,7 +394,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func startPermissionPolling() {
         guard permissionTimer == nil else { return }
         let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.schedule(deadline: .now() + 2, repeating: .seconds(2))
+        timer.schedule(deadline: .now() + 0.5, repeating: .milliseconds(500))
         timer.setEventHandler { [weak self] in
             guard let self = self else { return }
             if AXIsProcessTrusted() {
@@ -556,7 +556,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func startLidMonitor() {
         let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.schedule(deadline: .now(), repeating: .seconds(1))
+        timer.schedule(deadline: .now(), repeating: .milliseconds(500))
         timer.setEventHandler { [weak self] in
             self?.pollLidState()
         }
