@@ -327,11 +327,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             IOHIDManagerClose(old, IOOptionBits(kIOHIDOptionsTypeNone))
         }
         let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
-        let filter: [String: Any] = [
+        let filter = [
             kIOHIDDeviceUsagePageKey: kHIDPage_GenericDesktop,
             kIOHIDDeviceUsageKey: kHIDUsage_GD_Keyboard,
-        ]
-        IOHIDManagerSetDeviceMatching(manager, filter as CFDictionary)
+        ] as NSDictionary
+        IOHIDManagerSetDeviceMatching(manager, filter)
+
+        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
+        IOHIDManagerRegisterDeviceMatchingCallback(manager, { context, _, _, device in
+            guard let context = context else { return }
+            let d = Unmanaged<AppDelegate>.fromOpaque(context).takeUnretainedValue()
+            d.setCapsLockLED(on: d.active)
+        }, selfPtr)
+
+        IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
         IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
         hidManager = manager
     }
