@@ -357,7 +357,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         setCapsLockRemapping(enabled: false)
-        setCapsLockLED(on: false)
+        let osCapslockOn = CGEventSource.flagsState(.hidSystemState).contains(.maskAlphaShift)
+        setCapsLockLED(on: osCapslockOn)
 
         if let manager = hidManager {
             IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone))
