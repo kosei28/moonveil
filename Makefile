@@ -32,6 +32,7 @@ install: app
 	fi; \
 	rm -rf $(INSTALL_PATH)/$(APP_NAME); \
 	cp -r $(APP_NAME) $(INSTALL_PATH)/$(APP_NAME); \
+	tccutil reset Accessibility com.moonveil.app 2>/dev/null || true; \
 	if $$was_running; then \
 		open $(INSTALL_PATH)/$(APP_NAME); \
 	fi

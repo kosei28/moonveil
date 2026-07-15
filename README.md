@@ -21,10 +21,24 @@ make install
 | **Enable / Disable** | スリープ抑止のON/OFF。ONでアイコンが `moon.zzz.fill` に変わる |
 | **Lock Screen** | 蓋を閉じたときにロック＋画面オフにするモード（デフォルト） |
 | **Clamshell** | 蓋を閉じてもそのまま外部モニターで作業を続けるモード |
+| **Use CapsLock to Toggle** | CapsLockキーでスリープ抑止をON/OFFするモード（デフォルト無効） |
 | **Launch at Login** | ログイン時の自動起動。チェックマークで状態表示 |
 | **Quit** | 終了。スリープ抑止中なら自動で解除してから終了する |
 
 初回のEnableで管理者パスワードを求められる。`/etc/sudoers.d/moonveil` にNOPASSWDルールがインストールされるため、2回目以降はダイアログなしで即座にON/OFFできる。
+
+### CapsLock Toggle
+
+CapsLockキーでスリープ抑止のON/OFFを切り替えるモード。有効にすると：
+
+- CapsLock本来の動作（大文字入力の切り替え）は完全に無効化される
+- CapsLockのLEDがスリープ抑止の状態を示す（ON=点灯、OFF=消灯）
+
+初回有効化時にアクセシビリティ権限を求められる。権限が付与されていない場合はメニューに「⚠ Grant Accessibility Permission…」が表示される。
+
+`make install` 時にアクセシビリティ権限はリセットされるため、再インストール後は再度権限の付与が必要。
+
+この機能は [Capsomnia](https://github.com/fuji-mak/Capsomnia) にインスパイアされている。CapsLock本来の動作が残るCapsomniaとは異なり、HIDレベルのリマップにより完全に無効化している。
 
 ### Enable中の挙動
 
@@ -58,6 +72,8 @@ make uninstall
 | ディスプレイオフ | IODisplayWrangler `IORequestIdle` / `pmset displaysleepnow` |
 | 蓋の検知 | IOPMrootDomain `AppleClamshellState` を1秒ポーリング |
 | スリープ要求の拒否 | `IORegisterForSystemPower` で `kIOMessageCanSystemSleep` を veto |
+| CapsLockリマップ | `hidutil` で CapsLock → F18 にリマップし、イベントタップで F18 を捕捉 |
+| CapsLock LED | `IOHIDDeviceSetValue` で直接制御 |
 | 権限昇格 | `NSAppleScript` → sudoersルールで以降はパスワード不要 |
 | ログイン項目 | `SMAppService.mainApp` |
 

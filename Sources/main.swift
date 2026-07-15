@@ -21,6 +21,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var lockScreenItem: NSMenuItem!
     private var clamshellItem: NSMenuItem!
     private var loginItem: NSMenuItem!
+    private var capsLockToggleItem: NSMenuItem!
     private var active = false
     private var lidAction: LidAction = .lockScreen
 
@@ -31,6 +32,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var lidTimer: DispatchSourceTimer?
     private var screenCountBeforeLidClose = 0
 
+    private var capsLockToggleEnabled = false
+    private var eventTap: CFMachPort?
+    private var permissionItem: NSMenuItem!
+    private var permissionTimer: DispatchSourceTimer?
+    private var hidManager: IOHIDManager?
+
     // MARK: - App Lifecycle
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -40,6 +47,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         setupStatusItem()
         lidWasClosed = isClamshellClosed()
 
+        if UserDefaults.standard.bool(forKey: "capsLockToggle") {
+            enableCapsLockToggle()
+        }
+
         if UserDefaults.standard.bool(forKey: "enabled") {
             activate()
         }
@@ -47,6 +58,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         if active { deactivate() }
+        if capsLockToggleEnabled { disableCapsLockToggle() }
     }
 
     // MARK: - Menu Bar
@@ -72,6 +84,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(clamshellItem)
 
         updateModeMenu()
+
+        menu.addItem(.separator())
+
+        capsLockToggleItem = NSMenuItem(title: "Use CapsLock to Toggle", action: #selector(toggleCapsLockMode), keyEquivalent: "")
+        capsLockToggleItem.target = self
+        capsLockToggleItem.state = capsLockToggleEnabled ? .on : .off
+        menu.addItem(capsLockToggleItem)
+
+        permissionItem = NSMenuItem(title: "⚠ Grant Accessibility Permission…", action: #selector(requestAccessibility), keyEquivalent: "")
+        permissionItem.target = self
+        permissionItem.isHidden = true
+        menu.addItem(permissionItem)
 
         menu.addItem(.separator())
 
@@ -155,6 +179,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         active = true
         toggleItem.title = "Disable"
         updateIcon()
+        if capsLockToggleEnabled { setCapsLockLED(on: true) }
     }
 
     private func deactivate() {
@@ -178,6 +203,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         active = false
         toggleItem.title = "Enable"
         updateIcon()
+        if capsLockToggleEnabled { setCapsLockLED(on: false) }
     }
 
     // MARK: - Privileged Execution
@@ -233,6 +259,231 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         var error: NSDictionary?
         script.executeAndReturnError(&error)
         return error == nil
+    }
+
+    // MARK: - CapsLock Toggle
+
+    private let capsLockHIDSrc = 0x700000039
+    private let f18HIDDst = 0x70000006D
+    private let kVK_F18: Int64 = 0x4F
+
+    @objc private func toggleCapsLockMode() {
+        if capsLockToggleEnabled {
+            disableCapsLockToggle()
+        } else {
+            enableCapsLockToggle()
+        }
+        UserDefaults.standard.set(capsLockToggleEnabled, forKey: "capsLockToggle")
+    }
+
+    private func enableCapsLockToggle() {
+        guard !capsLockToggleEnabled else { return }
+
+        capsLockToggleEnabled = true
+        capsLockToggleItem?.state = .on
+
+        if !AXIsProcessTrusted() {
+            requestAccessibility()
+            permissionItem?.isHidden = false
+            startPermissionPolling()
+            return
+        }
+
+        activateCapsLockTap()
+    }
+
+    private func activateCapsLockTap() {
+        guard eventTap == nil else { return }
+
+        let mask: CGEventMask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue)
+        let callback: CGEventTapCallBack = { proxy, type, event, refcon in
+            guard let refcon = refcon else { return Unmanaged.passUnretained(event) }
+            let d = Unmanaged<AppDelegate>.fromOpaque(refcon).takeUnretainedValue()
+            return d.handleCapsLockEvent(proxy: proxy, type: type, event: event)
+        }
+
+        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: mask,
+            callback: callback,
+            userInfo: selfPtr
+        ) else { return }
+
+        eventTap = tap
+        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+
+        openHIDManager()
+        setCapsLockRemapping(enabled: true)
+        setCapsLockLED(on: active)
+    }
+
+    private func openHIDManager() {
+        if let old = hidManager {
+            IOHIDManagerClose(old, IOOptionBits(kIOHIDOptionsTypeNone))
+        }
+        let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
+        let filter: [String: Any] = [
+            kIOHIDDeviceUsagePageKey: kHIDPage_GenericDesktop,
+            kIOHIDDeviceUsageKey: kHIDUsage_GD_Keyboard,
+        ]
+        IOHIDManagerSetDeviceMatching(manager, filter as CFDictionary)
+        IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+        hidManager = manager
+    }
+
+    private func disableCapsLockToggle() {
+        guard capsLockToggleEnabled else { return }
+
+        stopPermissionPolling()
+
+        if let tap = eventTap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+            CFMachPortInvalidate(tap)
+            eventTap = nil
+        }
+
+        setCapsLockRemapping(enabled: false)
+        setCapsLockLED(on: false)
+
+        if let manager = hidManager {
+            IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+            hidManager = nil
+        }
+
+        capsLockToggleEnabled = false
+        capsLockToggleItem?.state = .off
+        permissionItem?.isHidden = true
+    }
+
+    private func startPermissionPolling() {
+        guard permissionTimer == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 2, repeating: .seconds(2))
+        timer.setEventHandler { [weak self] in
+            guard let self = self else { return }
+            if AXIsProcessTrusted() {
+                self.stopPermissionPolling()
+                self.permissionItem?.isHidden = true
+                self.activateCapsLockTap()
+            }
+        }
+        timer.resume()
+        permissionTimer = timer
+    }
+
+    private func stopPermissionPolling() {
+        permissionTimer?.cancel()
+        permissionTimer = nil
+    }
+
+    @objc private func requestAccessibility() {
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
+        AXIsProcessTrustedWithOptions(options)
+    }
+
+    private func handleCapsLockEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if let tap = eventTap {
+                CGEvent.tapEnable(tap: tap, enable: true)
+            }
+            return Unmanaged.passUnretained(event)
+        }
+
+        let keycode = event.getIntegerValueField(.keyboardEventKeycode)
+        guard keycode == kVK_F18 else { return Unmanaged.passUnretained(event) }
+
+        if type == .keyDown {
+            DispatchQueue.main.async { [weak self] in
+                self?.toggle()
+            }
+        }
+
+        return nil
+    }
+
+    // MARK: - CapsLock Key Remapping
+
+    private func setCapsLockRemapping(enabled: Bool) {
+        var mappings = readHIDKeyMappings().filter { $0["HIDKeyboardModifierMappingSrc"] != capsLockHIDSrc }
+
+        if enabled {
+            mappings.append([
+                "HIDKeyboardModifierMappingSrc": capsLockHIDSrc,
+                "HIDKeyboardModifierMappingDst": f18HIDDst,
+            ])
+        }
+
+        writeHIDKeyMappings(mappings)
+    }
+
+    private func readHIDKeyMappings() -> [[String: Int]] {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/hidutil")
+        p.arguments = ["property", "--get", "UserKeyMapping"]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        do {
+            try p.run()
+            p.waitUntilExit()
+        } catch {
+            return []
+        }
+
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
+              let array = plist as? [[String: Any]] else {
+            return []
+        }
+
+        return array.compactMap { dict in
+            guard let src = dict["HIDKeyboardModifierMappingSrc"] as? Int,
+                  let dst = dict["HIDKeyboardModifierMappingDst"] as? Int else { return nil }
+            return ["HIDKeyboardModifierMappingSrc": src, "HIDKeyboardModifierMappingDst": dst]
+        }
+    }
+
+    private func writeHIDKeyMappings(_ mappings: [[String: Int]]) {
+        let payload: [String: Any] = ["UserKeyMapping": mappings.map { $0 as [String: Any] }]
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: payload),
+              let jsonString = String(data: jsonData, encoding: .utf8) else { return }
+
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/hidutil")
+        p.arguments = ["property", "--set", jsonString]
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        try? p.run()
+        p.waitUntilExit()
+    }
+
+    // MARK: - CapsLock LED
+
+    private func setCapsLockLED(on: Bool) {
+        guard let manager = hidManager,
+              let devices = IOHIDManagerCopyDevices(manager) as? Set<IOHIDDevice> else { return }
+
+        for device in devices {
+            guard let elements = IOHIDDeviceCopyMatchingElements(
+                device,
+                [kIOHIDElementUsagePageKey: kHIDPage_LEDs,
+                 kIOHIDElementUsageKey: kHIDUsage_LED_CapsLock] as CFDictionary,
+                IOOptionBits(kIOHIDOptionsTypeNone)
+            ) as? [IOHIDElement], let element = elements.first else { continue }
+
+            let value = IOHIDValueCreateWithIntegerValue(
+                kCFAllocatorDefault,
+                element,
+                0,
+                on ? 1 : 0
+            )
+            IOHIDDeviceSetValue(device, element, value)
+        }
     }
 
     // MARK: - Power Callbacks (veto sleep requests)
