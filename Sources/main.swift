@@ -640,16 +640,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Display Blanking
 
     private func blankDisplay() {
-        let service = IOServiceGetMatchingService(
-            kIOMainPortDefault,
-            IOServiceMatching("IODisplayWrangler")
-        )
-        if service != 0 {
-            IORegistryEntrySetCFProperty(service, "IORequestIdle" as CFString, kCFBooleanTrue)
-            IOObjectRelease(service)
-            return
-        }
-
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
         p.arguments = ["displaysleepnow"]

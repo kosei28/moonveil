@@ -69,7 +69,7 @@ make uninstall
 |---|---|
 | スリープ抑止 | `pmset disablesleep` |
 | 画面ロック | `SACLockScreenImmediate`（login.framework private API） |
-| ディスプレイオフ | IODisplayWrangler `IORequestIdle` / `pmset displaysleepnow` |
+| ディスプレイオフ | `pmset displaysleepnow` |
 | 蓋の検知 | IOPMrootDomain `AppleClamshellState` を500msポーリング |
 | スリープ要求の拒否 | `IORegisterForSystemPower` で `kIOMessageCanSystemSleep` を veto |
 | CapsLockリマップ | `hidutil` で CapsLock → F18 にリマップし、イベントタップで F18 を捕捉 |
